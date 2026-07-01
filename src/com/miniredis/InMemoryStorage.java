@@ -9,17 +9,20 @@ public final class InMemoryStorage {
     private InMemoryStorage() { }
     public static InMemoryStorage get() { return INSTANCE; }
 
-    private final ConcurrentHashMap<String, String> map = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<ByteArrayWrapper, byte[]> map = new ConcurrentHashMap<>();
     
-    public void set(String key, String value) {
-        map.put(key, value);
+    public void set(byte[] key, byte[] value) {
+        ByteArrayWrapper obj = new ByteArrayWrapper(key);
+        map.put(obj, value);
     }
 
-    public String get(String key) {
-        return map.get(key);
+    public byte[] get(byte[] key) {
+        ByteArrayWrapper obj = new ByteArrayWrapper(key);
+        return map.get(obj);
     }
 
-    public boolean del(String key) {
-        return map.remove(key) != null;
+    public boolean del(byte[] key) {
+        ByteArrayWrapper obj = new ByteArrayWrapper(key);
+        return map.remove(obj) != null;
     }
 }

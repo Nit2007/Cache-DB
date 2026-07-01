@@ -24,7 +24,14 @@ public class Benchmark {
             // Benchmark SET
             long setStart = System.currentTimeMillis();
             for (int i = 0; i < requests; i++) {
-                String cmd = "*3\r\n$3\r\nSET\r\n$4\r\nkey" + i + "\r\n$4\r\nval" + i + "\r\n";
+                String key = "key" + i;
+                String value = "val" + i;
+                String cmd =
+                    "*3\r\n" +
+                    "$3\r\nSET\r\n" +
+                    "$" + key.length() + "\r\n" + key + "\r\n" +
+                    "$" + value.length() + "\r\n" + value + "\r\n";
+                // String cmd = "*3\r\n$3\r\nSET\r\n$4\r\nkey" + i + "\r\n$4\r\nval" + i + "\r\n";
                 out.write(cmd.getBytes());
                 in.read(buffer); // Read +OK\r\n
             }
@@ -35,9 +42,13 @@ public class Benchmark {
             // Benchmark GET
             long getStart = System.currentTimeMillis();
             for (int i = 0; i < requests; i++) {
-                String cmd = "*2\r\n$3\r\nGET\r\n$4\r\nkey" + i + "\r\n";
+                String key = "key" + i;
+                String cmd =
+                    "*2\r\n" +
+                    "$3\r\nGET\r\n" +
+                    "$" + key.length() + "\r\n" + key + "\r\n";
                 out.write(cmd.getBytes());
-                in.read(buffer); // Read response
+                in.read(buffer); // Read the bulk string response
             }
             long getEnd = System.currentTimeMillis();
             double getTimeSeconds = (getEnd - getStart) / 1000.0;

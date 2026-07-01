@@ -1,52 +1,80 @@
 package com.miniredis;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 
 public class RespParser {
-
-    private final BufferedReader reader;
+    private final InputStream in;
     public RespParser(InputStream in) {
-        this.reader = new BufferedReader(new InputStreamReader(in));
+        this.in = in;
+    }
+    // Reads a RESP protocol line ending with \r\n.
+    private String readLine() throws IOException {
+        StringBuilder sb = new StringBuilder();
+        int c;
+        while ((c = in.read()) != -1) {
+            if (c == '\r') {
+                int next = in.read();
+                if (next == '\n') {
+                    break;
+                }
+                sb.append((char) c);
+                if (next != -1) {
+                    sb.append((char) next);
+                }
+            } else {
+                sb.append((char) c);
+            }
+        }
+
+        if (sb.length() == 0 && c == -1) {
+            return null;
+        }
+
+        return sb.toString();
     }
 
-    // Returns the next complete command as a String array, e.g. ["SET", "name", "Random"]
-    // Returns null if the client disconnected.
-    // Throws IOException on stream errors.
-    public String[] readCommand() throws IOException {
-        String firstLine = reader.readLine();
-        if (firstLine == null) return null;
+    // Returns null if the client disconnects cleanly.
+    public byte[][] readCommand() throws IOException {
+        String firstLine = readLine();
+        if (firstLine == null) {
+            return null;
+        }
         if (!firstLine.startsWith("*")) {
             throw new IOException("Expected '*', got: " + firstLine);
         }
-
         int numArgs = Integer.parseInt(firstLine.substring(1));
-        String[] command = new String[numArgs];
+        byte[][] command = new byte[numArgs][];
 
         for (int i = 0; i < numArgs; i++) {
-            String lengthLine = reader.readLine();
-            if (lengthLine == null) return null;
+            String lengthLine = readLine();
+            if (lengthLine == null) {
+                return null;
+            }
+
             if (!lengthLine.startsWith("$")) {
                 throw new IOException("Expected '$', got: " + lengthLine);
             }
 
             int tokenLength = Integer.parseInt(lengthLine.substring(1));
+            byte[] data = new byte[tokenLength];
+            int bytesRead = 0;
 
-            char[] tokenBuf = new char[tokenLength];
-            int charsRead = 0;
-            while (charsRead < tokenLength) {
-                int result = reader.read(tokenBuf, charsRead, tokenLength - charsRead);
-                if (result == -1) return null;
-                charsRead += result;
+            while (bytesRead < tokenLength) {
+                int result = in.read(data, bytesRead, tokenLength - bytesRead);
+                if (result == -1) {
+                    throw new IOException("Unexpected end of stream while reading data");
+                }
+                bytesRead += result;
             }
-            command[i] = new String(tokenBuf);
+            command[i] = data;
 
-            // Consume the trailing \r\n after the token,discards the empty line after the token
-            reader.readLine(); 
+            int cr = in.read();
+            int lf = in.read();
+            if (cr != '\r' || lf != '\n') {
+                throw new IOException("Expected \\r\\n after bulk string data");
+            }
         }
-
         return command;
     }
 }

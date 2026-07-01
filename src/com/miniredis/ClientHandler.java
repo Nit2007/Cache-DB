@@ -1,216 +1,178 @@
 package com.miniredis;
 
+import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 
 public class ClientHandler implements Runnable {
+
     private final Socket socket;
     private final InMemoryStorage storage = InMemoryStorage.get();
-
     public ClientHandler(Socket socket) {
         this.socket = socket;
     }
-
     @Override
     public void run() {
-        String clientAddr = socket.getInetAddress().getHostAddress()
-                          + ":" + socket.getPort();
+        String clientAddr = socket.getInetAddress().getHostAddress() + ":" + socket.getPort();
         System.out.println("[Handler] Connected: " + clientAddr);
-
         try (
-            InputStream in   = socket.getInputStream();
-            OutputStream out = socket.getOutputStream();
-        ) {
+            InputStream in = new BufferedInputStream(socket.getInputStream());
+            OutputStream out = socket.getOutputStream()
+        ){
             RespParser parser = new RespParser(in);
-
             while (true) {
-                // Blocks until a full RESP command arrives.
-                String[] command = parser.readCommand();
-
-                // null means client disconnected cleanly.
+                byte[][] command = parser.readCommand();
                 if (command == null) {
                     System.out.println("[Handler] Disconnected: " + clientAddr);
                     break;
                 }
-
-                // Log what we parsed. You should see ["SET", "name", "nithish"] etc.
-                // System.out.print("[Handler:" + clientAddr + "] Command: ");
-                // for (String token : command) System.out.print("[" + token + "] ");
-                // System.out.println();
-
-                // Route to the right handler based on command[0].
-                // command[0] is always the Redis command name.
-                String response = handleCommand(command);
-                out.write(response.getBytes());
-                out.flush();
+                handleCommand(command, out);
+                // Flush only after pipeline finishes.
+                if (in.available() == 0) {
+                    out.flush();
+                }
             }
 
         } catch (IOException e) {
-            System.err.println("[Handler] Error for " + clientAddr + ": " + e.getMessage());
+            System.err.println("[Handler] Error for "
+                    + clientAddr + ": " + e.getMessage());
         }
     }
 
-    // ================================================================
-    //  COMMAND ROUTER
-    //  This method receives the parsed command tokens and decides
-    //  what to do. Each "case" handles one Redis command.
-    //
-    //  RESP response cheat-sheet (you'll use these constantly):
-    //    Simple string  →  +<text>\r\n           e.g.  +OK\r\n
-    //    Error          →  -<message>\r\n         e.g.  -ERR unknown command\r\n
-    //    Bulk string    →  $<len>\r\n<data>\r\n   e.g.  $3\r\nbar\r\n
-    //    Null           →  $-1\r\n               (key doesn't exist)
-    //    Integer        →  :<number>\r\n          e.g.  :1\r\n
-    // ================================================================
-    private String handleCommand(String[] command) {
+    private void handleCommand(byte[][] command, OutputStream out)
+            throws IOException {
 
-        // Redis commands are case-insensitive, so we normalise to uppercase.
-        String cmd = command[0].toUpperCase();
+        String cmd = new String(command[0]).toUpperCase();
 
         switch (cmd) {
 
-            // ────────────────────────────────────────────────
-            //  PING  – health-check / connection test
-            //  Usage:  PING          → +PONG
-            //          PING hello    → $5\r\nhello\r\n
-            // ────────────────────────────────────────────────
             case "PING":
-                if (command.length == 1) {
-                    return "+PONG\r\n";
-                } else {
-                    String msg = command[1];
-                    return "$" + msg.length() + "\r\n" + msg + "\r\n";
-                }
+                handlePing(command, out);
+                break;
 
-            // ────────────────────────────────────────────────
-            //  ECHO  – parrot back whatever the client sends
-            //  Usage:  ECHO hello    → $5\r\nhello\r\n
-            // ────────────────────────────────────────────────
             case "ECHO":
-                if (command.length < 2) return "-ERR wrong number of arguments\r\n";
-                String echo = command[1];
-                return "$" + echo.length() + "\r\n" + echo + "\r\n";
+                handleEcho(command, out);
+                break;
 
-            // ────────────────────────────────────────────────
-            //  SET  – store a key-value pair in memory
-            //  Usage:  SET mykey myvalue
-            //
-            //  How it works:
-            //    1. Validate that the client sent exactly 3 tokens:
-            //       command[0] = "SET", command[1] = key, command[2] = value
-            //    2. Call storage.set(key, value) which does
-            //       ConcurrentHashMap.put(key, value) under the hood.
-            //    3. Return "+OK\r\n" – the standard Redis success response
-            //       for SET.
-            //
-            //  Why "+OK\r\n"?
-            //    The '+' prefix tells the RESP parser "this is a Simple
-            //    String response". Every RESP line ends with \r\n.
-            //    Real Redis returns exactly this for a successful SET.
-            // ────────────────────────────────────────────────
             case "SET":
-                // Guard: SET needs exactly key + value (3 tokens total)
-                if (command.length != 3) {
-                    return "-ERR wrong number of arguments for 'SET'\r\n";
-                }
+                handleSet(command, out);
+                break;
 
-                // command[1] = key,  command[2] = value
-                // e.g. SET name nithish  →  key="name", value="nithish"
-                String setKey = command[1];
-                String setVal = command[2];
-
-                // Put it in our ConcurrentHashMap.
-                // If the key already exists, its old value is silently replaced.
-                // This matches real Redis behaviour.
-                storage.set(setKey, setVal);
-
-                // Tell the client it worked.
-                return "+OK\r\n";
-
-            // ────────────────────────────────────────────────
-            //  GET  – retrieve a value by key
-            //  Usage:  GET mykey
-            //
-            //  Two possible outcomes:
-            //    a) Key exists   → return its value as a Bulk String
-            //       Format:  $<length>\r\n<value>\r\n
-            //       Example: GET name → $7\r\nnithish\r\n
-            //
-            //    b) Key missing  → return a Null Bulk String
-            //       Format:  $-1\r\n
-            //       This is how Redis says "this key doesn't exist".
-            //       The client library (redis-cli, Jedis, etc.) turns
-            //       this into null / nil / None in the caller's language.
-            // ────────────────────────────────────────────────
             case "GET":
-                // Guard: GET needs exactly 1 key (2 tokens total)
-                if (command.length != 2) {
-                    return "-ERR wrong number of arguments for 'GET'\r\n";
-                }
+                handleGet(command, out);
+                break;
 
-                String getKey = command[1];
-
-                // Look up the key. Returns null if absent.
-                String val = storage.get(getKey);
-
-                if (val == null) {
-                    // Key doesn't exist → RESP Null Bulk String
-                    return "$-1\r\n";
-                }
-
-                // Key exists → RESP Bulk String
-                // Format: $<byte-length>\r\n<actual-data>\r\n
-                // The '$' prefix tells the parser "a bulk string follows,
-                // and its length is <N> bytes". The parser reads exactly
-                // N bytes after the first \r\n, then expects another \r\n.
-                return "$" + val.length() + "\r\n" + val + "\r\n";
-
-            // ────────────────────────────────────────────────
-            //  DEL  – delete one or more keys
-            //  Usage:  DEL key1 key2 key3 ...
-            //
-            //  Returns an Integer reply :<count>\r\n where count is the
-            //  number of keys that actually existed and were removed.
-            //
-            //  Example:
-            //    SET a 1        → +OK
-            //    SET b 2        → +OK
-            //    DEL a b c      → :2    (a & b removed, c didn't exist)
-            //
-            //  Why a loop?
-            //    Real Redis DEL supports deleting multiple keys in one
-            //    command. We iterate from command[1] to command[N-1],
-            //    try to remove each, and count the successes.
-            // ────────────────────────────────────────────────
             case "DEL":
-                // Guard: DEL needs at least 1 key
-                if (command.length < 2) {
-                    return "-ERR wrong number of arguments for 'DEL'\r\n";
-                }
+                handleDel(command, out);
+                break;
 
-                int removed = 0;
+            case "HSET":
+                handleHSet(command, out);
+                break;
 
-                // Loop through every key the client wants deleted.
-                // command[0] = "DEL", so keys start at index 1.
-                for (int i = 1; i < command.length; i++) {
-                    // storage.get() returns null if absent.
-                    // We only count it as "removed" if the key actually existed.
-                    if (storage.get(command[i]) != null) {
-                        storage.del(command[i]);   // we need to add del() to InMemoryStorage
-                        removed++;
-                    }
-                }
+            case "HGET":
+                handleHGet(command, out);
+                break;
 
-                // RESP Integer reply: :<number>\r\n
-                return ":" + removed + "\r\n";
-
-            // ────────────────────────────────────────────────
-            //  Unknown command → error
-            // ────────────────────────────────────────────────
             default:
-                return "-ERR unknown command '" + command[0] + "'\r\n";
+                writeError(out, "unknown command '" + cmd + "'");
         }
     }
-}
+
+    // ---------------------------------------------------------------------------------------------
+    //                      Command Handlers
+    // -----------------------------------------------------------------------------------------------
+
+    private void handlePing(byte[][] command, OutputStream out) throws IOException {
+        if (command.length == 1) {
+            writeSimpleString(out, "PONG");
+            return;
+        }
+        writeBulkString(out, command[1]);
+    }
+
+    private void handleEcho(byte[][] command, OutputStream out) throws IOException {
+        if (command.length < 2) {
+            writeError(out, "wrong number of arguments");
+            return;
+        }
+        writeBulkString(out, command[1]);
+    }
+
+    private void handleSet(byte[][] command, OutputStream out) throws IOException {
+        if (command.length != 3) {
+            writeError(out, "wrong number of arguments for 'SET'");
+            return;
+        }
+        storage.set(command[1], command[2]);
+        writeSimpleString(out, "OK");
+    }
+
+    private void handleGet(byte[][] command, OutputStream out) throws IOException {
+        if (command.length != 2) {
+            writeError(out, "wrong number of arguments for 'GET'");
+            return;
+        }
+        writeBulkString(out, storage.get(command[1]));
+    }
+
+    private void handleDel(byte[][] command, OutputStream out) throws IOException {
+        if (command.length < 2) {
+            writeError(out, "wrong number of arguments for 'DEL'");
+            return;
+        }
+
+        int removed = 0;
+        for (int i = 1; i < command.length; i++) {
+            if (storage.del(command[i])) {
+                removed++;
+            }
+        }
+
+        writeInteger(out, removed);
+    }
+
+    private void handleHSet(byte[][] command, OutputStream out) throws IOException {
+        if (command.length != 4) {
+            writeError(out, "wrong number of arguments for 'HSET'");
+            return;
+        }
+        storage.hset(command[1], command[2], command[3]);
+        writeSimpleString(out, "OK");
+    }
+
+    private void handleHGet(byte[][] command, OutputStream out) throws IOException {
+        if (command.length != 3) {
+            writeError(out, "wrong number of arguments for 'HGET'");
+            return;
+        }
+        writeBulkString(out, storage.hget(command[1], command[2]));
+    }
+
+    // ---------------------------------------------------
+    // RESP Writers
+    // ---------------------------------------------------
+
+    private void writeSimpleString(OutputStream out, String value) throws IOException {
+        out.write(("+" + value + "\r\n").getBytes());
+    }
+
+    private void writeError(OutputStream out, String message) throws IOException {
+        out.write(("-ERR " + message + "\r\n").getBytes());
+    }
+
+    private void writeInteger(OutputStream out, int value) throws IOException {
+        out.write((":" + value + "\r\n").getBytes());
+    }
+
+    private void writeBulkString(OutputStream out, byte[] value) throws IOException {
+        if (value == null) {
+            out.write("$-1\r\n".getBytes());
+            return;
+        }
+        out.write(("$" + value.length + "\r\n").getBytes());
+        out.write(value);
+        out.write("\r\n".getBytes());
+    }
