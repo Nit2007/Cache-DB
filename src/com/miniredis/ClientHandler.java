@@ -68,6 +68,14 @@ public class ClientHandler implements Runnable {
                 handleDel(command, out);
                 break;
 
+            case "EXPIRE":
+                handleExpire(command, out);
+                break;
+
+            case "TTL":
+                handleTtl(command, out);
+                break;
+
             case "HSET":
                 handleHSet(command, out);
                 break;
@@ -151,6 +159,29 @@ public class ClientHandler implements Runnable {
         writeBulkString(out, storage.hget(command[1], command[2]));
     }
 
+    private void handleExpire(byte[][] command, OutputStream out) throws IOException {
+        if (command.length != 3) {
+            writeError(out, "wrong number of arguments for 'EXPIRE'");
+            return;
+        }
+        try {
+            long seconds = Long.parseLong(new String(command[2]));
+            int result = storage.expire(command[1], seconds * 1000L);
+            writeInteger(out, result);
+        } catch (NumberFormatException e) {
+            writeError(out, "value is not an integer or out of range");
+        }
+    }
+
+    private void handleTtl(byte[][] command, OutputStream out) throws IOException {
+        if (command.length != 2) {
+            writeError(out, "wrong number of arguments for 'TTL'");
+            return;
+        }
+        long result = storage.ttl(command[1]);
+        writeInteger(out, (int)result);
+    }
+
     // ---------------------------------------------------
     // RESP Writers
     // ---------------------------------------------------
@@ -176,3 +207,4 @@ public class ClientHandler implements Runnable {
         out.write(value);
         out.write("\r\n".getBytes());
     }
+}
