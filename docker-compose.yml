@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  redis-clone:
+    build: .
+    ports:
+      - "6380:6380"
+    volumes:
+      - data:/app/data
+    working_dir: /app/data
+    command: ["java", "-cp", "/app", "com.miniredis.RedisServer", "--aof", "everysec"]
+
+volumes:
+  data:

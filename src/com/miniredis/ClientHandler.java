@@ -8,10 +8,21 @@ import java.net.Socket;
 
 public class ClientHandler implements Runnable {
 
+    public static volatile double defaultRateCapacity = -1;
+    public static volatile double defaultRateRefill = -1;
+
     private final Socket socket;
     private final InMemoryStorage storage = InMemoryStorage.get();
-    public ClientHandler(Socket socket) {
+    private final RdbPersister rdb;
+    private final AofPersister aof;
+    
+    private final TokenBucket rateLimiter = new TokenBucket(Double.MAX_VALUE, Double.MAX_VALUE);
+    private double currentCapacity = -1;
+
+    public ClientHandler(Socket socket, RdbPersister rdb, AofPersister aof) {
         this.socket = socket;
+        this.rdb = rdb;
+        this.aof = aof;
     }
     @Override
     public void run() {
@@ -41,51 +52,69 @@ public class ClientHandler implements Runnable {
         }
     }
 
-    private void handleCommand(byte[][] command, OutputStream out)
+    public void handleCommand(byte[][] command, OutputStream out)
             throws IOException {
 
         String cmd = new String(command[0]).toUpperCase();
 
-        switch (cmd) {
+        if (defaultRateCapacity != -1 && out != null) {
+            if (currentCapacity != defaultRateCapacity) {
+                rateLimiter.setConfig(defaultRateCapacity, defaultRateRefill);
+                currentCapacity = defaultRateCapacity;
+            }
+            if (!rateLimiter.tryConsume(1)) {
+                writeError(out, "rate limit exceeded");
+                return;
+            }
+        }
 
-            case "PING":
-                handlePing(command, out);
-                break;
-
-            case "ECHO":
-                handleEcho(command, out);
-                break;
-
-            case "SET":
-                handleSet(command, out);
-                break;
-
-            case "GET":
-                handleGet(command, out);
-                break;
-
-            case "DEL":
-                handleDel(command, out);
-                break;
-
-            case "EXPIRE":
-                handleExpire(command, out);
-                break;
-
-            case "TTL":
-                handleTtl(command, out);
-                break;
-
-            case "HSET":
-                handleHSet(command, out);
-                break;
-
-            case "HGET":
-                handleHGet(command, out);
-                break;
-
-            default:
-                writeError(out, "unknown command '" + cmd + "'");
+        try {
+            switch (cmd) {
+                case "PING":
+                    handlePing(command, out);
+                    break;
+                case "ECHO":
+                    handleEcho(command, out);
+                    break;
+                case "SET":
+                    handleSet(command, out);
+                    break;
+                case "GET":
+                    handleGet(command, out);
+                    break;
+                case "DEL":
+                    handleDel(command, out);
+                    break;
+                case "EXPIRE":
+                    handleExpire(command, out);
+                    break;
+                case "TTL":
+                    handleTtl(command, out);
+                    break;
+                case "HSET":
+                    handleHSet(command, out);
+                    break;
+                case "HGET":
+                    handleHGet(command, out);
+                    break;
+                case "HDEL":
+                    handleHDel(command, out);
+                    break;
+                case "SAVE":
+                    handleSave(command, out);
+                    break;
+                case "RATELIMIT":
+                    handleRateLimit(command, out);
+                    break;
+                default:
+                    writeError(out, "unknown command '" + cmd + "'");
+            }
+        } catch (RuntimeException e) {
+            if (e.getMessage() != null && e.getMessage().startsWith("WRONGTYPE")) {
+                writeError(out, e.getMessage());
+            } else {
+                throw e;
+            }
         }
     }
 
@@ -115,6 +144,7 @@ public class ClientHandler implements Runnable {
             return;
         }
         storage.set(command[1], command[2]);
+        if (aof != null) aof.append(command);
         writeSimpleString(out, "OK");
     }
 
@@ -138,6 +168,7 @@ public class ClientHandler implements Runnable {
                 removed++;
             }
         }
+        if (removed > 0 && aof != null) aof.append(command);
 
         writeInteger(out, removed);
     }
@@ -147,8 +178,9 @@ public class ClientHandler implements Runnable {
             writeError(out, "wrong number of arguments for 'HSET'");
             return;
         }
-        storage.hset(command[1], command[2], command[3]);
-        writeSimpleString(out, "OK");
+        int result = storage.hset(command[1], command[2], command[3]);
+        if (aof != null) aof.append(command);
+        writeInteger(out, result);
     }
 
     private void handleHGet(byte[][] command, OutputStream out) throws IOException {
@@ -159,6 +191,16 @@ public class ClientHandler implements Runnable {
         writeBulkString(out, storage.hget(command[1], command[2]));
     }
 
+    private void handleHDel(byte[][] command, OutputStream out) throws IOException {
+        if (command.length != 3) {
+            writeError(out, "wrong number of arguments for 'HDEL'");
+            return;
+        }
+        int result = storage.hdel(command[1], command[2]);
+        if (result > 0 && aof != null) aof.append(command);
+        writeInteger(out, result);
+    }
+
     private void handleExpire(byte[][] command, OutputStream out) throws IOException {
         if (command.length != 3) {
             writeError(out, "wrong number of arguments for 'EXPIRE'");
@@ -167,6 +209,7 @@ public class ClientHandler implements Runnable {
         try {
             long seconds = Long.parseLong(new String(command[2]));
             int result = storage.expire(command[1], seconds * 1000L);
+            if (result == 1 && aof != null) aof.append(command);
             writeInteger(out, result);
         } catch (NumberFormatException e) {
             writeError(out, "value is not an integer or out of range");
@@ -180,6 +223,35 @@ public class ClientHandler implements Runnable {
         }
         long result = storage.ttl(command[1]);
         writeInteger(out, (int)result);
+    }
+
+    private void handleSave(byte[][] command, OutputStream out) throws IOException {
+        if (rdb != null) {
+            try {
+                rdb.save();
+                writeSimpleString(out, "OK");
+            } catch (Exception e) {
+                writeError(out, "background save err");
+            }
+        } else {
+            writeError(out, "RDB not configured");
+        }
+    }
+
+    private void handleRateLimit(byte[][] command, OutputStream out) throws IOException {
+        if (command.length == 4 && new String(command[1]).equalsIgnoreCase("SET")) {
+            try {
+                double capacity = Double.parseDouble(new String(command[2]));
+                double refill = Double.parseDouble(new String(command[3]));
+                ClientHandler.defaultRateCapacity = capacity;
+                ClientHandler.defaultRateRefill = refill;
+                writeSimpleString(out, "OK");
+            } catch (NumberFormatException e) {
+                writeError(out, "value is not a valid float");
+            }
+        } else {
+            writeError(out, "syntax error");
+        }
     }
 
     // ---------------------------------------------------

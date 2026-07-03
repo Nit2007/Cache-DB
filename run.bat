@@ -24,6 +24,8 @@ echo [2/2] Launching mini-redis Server...
 echo ===================================================
 echo Server is running! Press Ctrl+C to stop.
 echo.
+echo (Tip: You can run 'run.bat --aof everysec' to enable AOF persistence)
+echo.
 
-:: Run the compiled main class
-java -cp out com.miniredis.RedisServer
+:: Run the compiled main class with any passed arguments
+java -cp out com.miniredis.RedisServer %*
