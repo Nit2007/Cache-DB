@@ -2,8 +2,7 @@
 FROM eclipse-temurin:21-jdk-alpine AS builder
 WORKDIR /app
 COPY src /app/src
-RUN javac src/com/miniredis/*.java
-RUN mkdir -p /app/out/com/miniredis && cp src/com/miniredis/*.class /app/out/com/miniredis/
+RUN javac -d /app/out src/com/miniredis/*.java src/com/cachedb/*.java src/com/cachedb/db/*.java src/com/cachedb/cache/*.java
 
 # Runtime stage
 FROM eclipse-temurin:21-jre-alpine

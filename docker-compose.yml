@@ -1,6 +1,16 @@
 version: '3.8'
 
 services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: cachedb
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysqldata:/var/lib/mysql
+
   redis-clone:
     build: .
     ports:
@@ -8,7 +18,26 @@ services:
     volumes:
       - data:/app/data
     working_dir: /app/data
-    command: ["java", "-cp", "/app", "com.miniredis.RedisServer", "--aof", "everysec"]
+    depends_on:
+      - mysql
+    command:
+      - java
+      - -cp
+      - /app
+      - com.miniredis.RedisServer
+      - --aof
+      - everysec
+      - --mysql-host
+      - mysql
+      - --mysql-port
+      - "3306"
+      - --mysql-db
+      - cachedb
+      - --mysql-user
+      - root
+      - --mysql-pass
+      - root
 
 volumes:
   data:
+  mysqldata:

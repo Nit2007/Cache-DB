@@ -1,5 +1,6 @@
 package com.miniredis;
 
+import com.cachedb.CacheDB;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -61,6 +62,9 @@ public class RedisServer {
         }
         
         rdb.startPeriodicSnapshot(60);
+
+        // Initialize CacheDB layer (connects to PostgreSQL if --pg-* flags given)
+        CacheDB.init(args);
 
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             serverSocket.setReuseAddress(true);

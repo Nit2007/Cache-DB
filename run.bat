@@ -8,7 +8,7 @@ echo ===================================================
 if not exist out mkdir out
 
 :: Compile all files inside the package directory
-javac -d out src/com/miniredis/*.java
+javac -d out src/com/miniredis/*.java src/com/cachedb/*.java src/com/cachedb/db/*.java src/com/cachedb/cache/*.java
 
 :: Check if compilation was successful (Error level 0 means success)
 if %errorlevel% neq 0 (
